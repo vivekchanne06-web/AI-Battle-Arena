@@ -1,26 +1,110 @@
 import { StateSchema, MessagesValue, type GraphNode, StateGraph, START, END } from "@langchain/langgraph";
+import { HumanMessage } from "@langchain/core/messages";
+import { z } from "zod";
+import { ReducedValue } from "@langchain/langgraph";
+import { geminiModel, mistralAIModel, cohereModel } from "./models.service.js";
+import { createAgent, providerStrategy } from "langchain";
+
+const State = new StateSchema({
+    messages: MessagesValue,
+
+    solution_1: new ReducedValue(
+        z.string().default(""), {
+        reducer: (current, next) => {
+            return next
+        }
+    }),
+
+    solution_2: new ReducedValue(
+        z.string().default(""), {
+        reducer: (current, next) => {
+            return next
+        }
+    }),
+
+    judge_recommendation: new ReducedValue(
+        z.object({
+            solution_1_score: z.number(),
+            solution_2_score: z.number(),
+        }).default({
+            solution_1_score: 0,
+            solution_2_score: 0
+        }
+        ),
+        {
+            reducer: (current, next) => {
+                return next
+            }
+        }
+    )
+})
 
 
-type JUDGEMENT  = {
-    winner: "solution_1" | "solution_2";
-    solution_1_score: number;
-    solution_2_score: number; 
+const solutionNode: GraphNode<typeof State> = async (state) => {
+
+    const prompt = String(state.messages.at(-1)!.content);
+
+    const [mistral_solution, cohere_solution] = await Promise.all([
+        mistralAIModel.invoke(prompt),
+        cohereModel.invoke(prompt),
+    ])
+    return {
+        solution_1: String(mistral_solution.content),
+        solution_2: String(cohere_solution.content)
+    }
 }
 
-type AIBattleArenaState = {
-    messages: typeof MessagesValue;
-    solution_1: string;
-    solution_2: string;
-    judement: JUDGEMENT;
-};
+const judgeNode: GraphNode<typeof State> = async (state) => {
+    const { solution_1, solution_2 } = state;
 
-const state: AIBattleArenaState = {
-    messages: MessagesValue,
-    solution_1: "",
-    solution_2: "",
-    judement: {
-        winner: "solution_1",
-        solution_1_score: 0,
-        solution_2_score: 0,
+    const prompt = String(state.messages.at(-1)!.content);
+
+    const judge = createAgent({
+        model: geminiModel,
+        tools: [],
+        responseFormat: providerStrategy(z.object({
+            solution_1_score: z.number().min(0).max(10),
+            solution_2_score: z.number().min(0).max(10),
+        }))
+    })
+
+
+    const judgeRespose = await judge.invoke({
+        messages: [
+            new HumanMessage(`You are a judge tasked with evaluating the quality of two solutions to a problem.
+                    the  problem is: ${prompt}. the firqst solution is: ${solution_1}. the second solution is: ${solution_2}.
+                    Please provide a score for each solution on a scale of 0 to 10, where 0 indicates a incorrect solution and 10 indicates an excellent solution.
+                    
+                `)
+        ]
+    })
+
+    const result = judgeRespose.structuredResponse
+
+    return {
+        judge_recommendation: result
     }
+
+}
+const graph = new StateGraph(State)
+    .addNode("solution", solutionNode)
+    .addNode("judge", judgeNode)
+    .addEdge(START, "solution")
+    .addEdge("solution", "judge")
+    .addEdge("judge", END)
+    .compile()
+
+export default async function (userMessage: string) {
+    const result = await graph.invoke({
+        messages: [
+            new HumanMessage(userMessage)
+        ]
+    })
+
+    console.log("Graph result:", result)
+    return {
+    solution_1: result.solution_1,
+    solution_2: result.solution_2,
+    judge: result.judge_recommendation,
+  };
 }

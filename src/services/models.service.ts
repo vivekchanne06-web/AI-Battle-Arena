@@ -4,7 +4,7 @@ import { ChatMistralAI } from "@langchain/mistralai";
 import { ChatCohere } from "@langchain/cohere"
 
 export const geminiModel = new ChatGoogle({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     apiKey: configValues.GEMINI_API_KEY,
 });
 
